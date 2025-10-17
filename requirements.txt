@@ -1,0 +1,14 @@
+fastapi==0.117.1
+uvicorn==0.36.0
+SQLAlchemy==2.0.43
+pydantic==2.11.1
+sentence-transformers==5.1.1
+numpy==2.2.6
+PyMuPDF==1.26.4
+python-docx==1.2.0
+pandas==2.2.3
+python-multipart==0.0.20
+python-jose[cryptography]==3.3.0
+python-dotenv
+pydantic[email]
+passlib[bcrypt]

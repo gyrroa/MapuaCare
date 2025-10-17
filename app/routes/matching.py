@@ -175,7 +175,6 @@ def top_jobs_for_candidate(
             job_id=j.job_id,
             job_title=j.job_title,
             job_category=j.job_category,
-            location=j.location,
             fit_score=float(fit),
             sim_score=float(sim),
             coverage_score=float(cov),

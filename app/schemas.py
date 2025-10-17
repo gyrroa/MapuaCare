@@ -54,14 +54,12 @@ class CompanyProfileRead(BaseModel):
 class CompanyJobCreate(BaseModel):
     job_title: str
     job_description: str
-    location: Optional[str] = None
     job_category: Optional[str] = None
     skills: Optional[List[int]] = None
 
 class CompanyJobUpdate(BaseModel):
     job_title: Optional[str] = None
     job_description: Optional[str] = None
-    location: Optional[str] = None
     job_category: Optional[str] = None
     skills: Optional[List[int]] = None
 
@@ -70,7 +68,6 @@ class CompanyJobRead(BaseModel):
     company_id: int
     job_title: str
     job_description: str
-    location: Optional[str]
     job_category: Optional[str]
     class Config:
         from_attributes = True
@@ -113,7 +110,6 @@ class JobRecommendation(BaseModel):
     job_id: int
     job_title: str
     job_category: Optional[str] = None
-    location: Optional[str] = None
     fit_score: float
     sim_score: float
     coverage_score: float

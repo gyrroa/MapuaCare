@@ -62,7 +62,6 @@ class CompanyJob(Base):
     company_id = Column(Integer, ForeignKey("users.user_id"))
     job_title = Column(String, nullable=False)
     job_description = Column(Text, nullable=False)
-    location = Column(String, nullable=True)
     job_category = Column(String, nullable=True)
     job_embedding_vector = Column(Text, nullable=True)  # JSON
 

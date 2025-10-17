@@ -169,7 +169,6 @@ def create_job(
         company_id=cid,
         job_title=job.job_title,
         job_description=job.job_description,
-        location=job.location,
         job_category=job.job_category,
     )
     db.add(company_job)
@@ -200,7 +199,6 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
 def list_jobs(
     db: Session = Depends(get_db),
     q: Optional[str] = Query(None, description="search in title/description/category"),
-    location: Optional[str] = None,
     category: Optional[str] = None,
     company_id: Optional[int] = Query(None, description="filter by company_id"),
     page: int = Query(1, ge=1),
@@ -208,8 +206,6 @@ def list_jobs(
 ):
     stmt = select(models.CompanyJob)
 
-    if location:
-        stmt = stmt.where(models.CompanyJob.location == location)
     if category:
         stmt = stmt.where(models.CompanyJob.job_category == category)
     if company_id is not None:
@@ -248,7 +244,7 @@ def update_job(
         raise HTTPException(403, "You can only update your own company's job")
 
     changed = False
-    for f in ["job_title", "job_description", "location", "job_category"]:
+    for f in ["job_title", "job_description", "job_category"]:
         val = getattr(patch, f)
         if val is not None:
             setattr(job, f, val)

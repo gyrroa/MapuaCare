@@ -8,8 +8,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load .env explicitly; then fall back to .env.example if needed
 load_dotenv(BASE_DIR / ".env")
-if not os.getenv("SECRET_KEY"):
-    load_dotenv(BASE_DIR / ".env.example")
 
 class Settings:
     PROJECT_NAME: str = os.getenv("PROJECT_NAME", "CARE Backend")

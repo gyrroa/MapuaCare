@@ -42,14 +42,15 @@ def _link_candidate_skills_from_names(db: Session, candidate_id: int, names: Opt
         sid = _get_or_create_skill_by_name(db, name)
         db.add(models.CandidateSkill(candidate_id=candidate_id, skill_id=sid))
 
-def _skill_names_for_candidate(db: Session, candidate_id: int) -> List[str]:
+def _skill_names_for_candidate(db: Session, candidate_id: int) -> list[str]:
     rows = (
         db.query(models.Skill.preferred_label)
         .join(models.CandidateSkill, models.CandidateSkill.skill_id == models.Skill.skill_id)
         .filter(models.CandidateSkill.candidate_id == candidate_id)
         .all()
     )
-    return [r[0] if isinstance(r, tuple) else r for r in rows]
+    # Each row is a tuple like ('Python',)
+    return [r[0] for r in rows]
 
 # 1) CV Upload (extract only) — cleanup temp file
 @router.post("/upload_cv")

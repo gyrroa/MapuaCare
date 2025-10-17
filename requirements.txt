@@ -11,4 +11,6 @@ python-multipart==0.0.20
 python-jose[cryptography]==3.3.0
 python-dotenv
 pydantic[email]
-passlib[bcrypt]
+passlib[argon2]
+psycopg[binary]
+supabase>=2.5.0

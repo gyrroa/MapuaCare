@@ -13,7 +13,12 @@ def get_db():
     finally:
         db.close()
 
-@router.post("", response_model=schemas.SkillRead)
+@router.post(
+    "",
+    response_model=schemas.SkillRead,
+    summary="Create a skill",
+    description="Create a skill concept (e.g., ESCO item).",
+)
 def create_skill(skill: schemas.SkillCreate, db: Session = Depends(get_db)):
     s = models.Skill(**skill.model_dump())
     db.add(s)
@@ -21,17 +26,27 @@ def create_skill(skill: schemas.SkillCreate, db: Session = Depends(get_db)):
     db.refresh(s)
     return s
 
-@router.get("/{skill_id}", response_model=schemas.SkillRead)
+@router.get(
+    "/{skill_id}",
+    response_model=schemas.SkillRead,
+    summary="Get a skill",
+    responses={404: {"description": "Skill not found"}},
+)
 def get_skill(skill_id: int, db: Session = Depends(get_db)):
     s = db.get(models.Skill, skill_id)
     if not s:
         raise HTTPException(404, "Skill not found")
     return s
 
-@router.get("", response_model=schemas.PageSkill)
+@router.get(
+    "",
+    response_model=schemas.PageSkill,
+    summary="List skills",
+    description="Search by label with `q`. Paginates with `page` and `per_page`.",
+)
 def list_skills(
     db: Session = Depends(get_db),
-    q: Optional[str] = Query(None, description="search by label"),
+    q: Optional[str] = Query(None, description="search by preferred/alt label"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=200),
 ):
@@ -48,7 +63,12 @@ def list_skills(
     ).scalars().all()
     return schemas.PageSkill(meta=schemas.PageMeta(page=page, per_page=per_page, total=total or 0), items=items)
 
-@router.put("/{skill_id}", response_model=schemas.SkillRead)
+@router.put(
+    "/{skill_id}",
+    response_model=schemas.SkillRead,
+    summary="Update a skill",
+    responses={404: {"description": "Skill not found"}},
+)
 def update_skill(skill_id: int, patch: schemas.SkillUpdate, db: Session = Depends(get_db)):
     s = db.get(models.Skill, skill_id)
     if not s:
@@ -61,7 +81,12 @@ def update_skill(skill_id: int, patch: schemas.SkillUpdate, db: Session = Depend
     db.refresh(s)
     return s
 
-@router.delete("/{skill_id}", status_code=204)
+@router.delete(
+    "/{skill_id}",
+    status_code=204,
+    summary="Delete a skill",
+    responses={404: {"description": "Skill not found"}},
+)
 def delete_skill(skill_id: int, db: Session = Depends(get_db)):
     s = db.get(models.Skill, skill_id)
     if not s:

@@ -58,29 +58,33 @@ def _delete_photo_url(photo_url: Optional[str]):
             pass
 
 # ---------------------------
-# CREATE COMPANY PROFILE (optional photo in same request) — auth required
+# CREATE COMPANY PROFILE
 # ---------------------------
-@router.post("/profile", response_model=schemas.CompanyProfileRead)
+@router.post(
+    "/profile",
+    response_model=schemas.CompanyProfileRead,
+    summary="Create your company profile",
+    description="Uses the authenticated user's ID; optional logo upload (png/jpg/jpeg/gif/webp).",
+    responses={400: {"description": "Already exists / invalid role"}, 404: {"description": "User not found"}},
+)
 async def create_company_profile(
-    user_id: int = Form(..., description="user_id of the company"),
     company_name: str = Form(...),
     photo: Optional[UploadFile] = File(None, description="optional company photo/logo"),
     db: Session = Depends(get_db),
     current: models.User = Depends(auth.get_current_user),
 ):
-    if current.user_id != user_id:
-        raise HTTPException(403, "You can only create your own company profile")
-    user = db.get(models.User, user_id)
+    uid = current.user_id
+    user = db.get(models.User, uid)
     if not user:
         raise HTTPException(404, "User not found")
     if user.role and user.role != "company":
         raise HTTPException(400, "User is not a company")
-    if db.get(models.CompanyProfile, user_id):
+    if db.get(models.CompanyProfile, uid):
         raise HTTPException(400, "Company profile already exists")
 
-    photo_url = _save_photo(user_id, photo) if photo else None
+    photo_url = _save_photo(uid, photo) if photo else None
     prof = models.CompanyProfile(
-        company_id=user_id,
+        company_id=uid,
         company_name=company_name,
         photo_url=photo_url,
     )
@@ -89,20 +93,27 @@ async def create_company_profile(
     db.refresh(prof)
     return prof
 
-# ---------------------------
 # READ ONE (public)
-# ---------------------------
-@router.get("/profiles/{company_id}", response_model=schemas.CompanyProfileRead)
+@router.get(
+    "/profiles/{company_id}",
+    response_model=schemas.CompanyProfileRead,
+    summary="Get a company profile",
+    responses={404: {"description": "Company profile not found"}},
+)
 def get_company_profile(company_id: int, db: Session = Depends(get_db)):
     prof = db.get(models.CompanyProfile, company_id)
     if not prof:
         raise HTTPException(404, "Company profile not found")
     return prof
 
-# ---------------------------
-# UPDATE COMPANY PROFILE (optional new photo / remove existing) — auth required
-# ---------------------------
-@router.put("/profiles/{company_id}", response_model=schemas.CompanyProfileRead)
+# UPDATE COMPANY PROFILE
+@router.put(
+    "/profiles/{company_id}",
+    response_model=schemas.CompanyProfileRead,
+    summary="Update your company profile",
+    description="Optionally upload a new logo or remove the existing one.",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Company profile not found"}},
+)
 async def update_company_profile(
     company_id: int,
     company_name: Optional[str] = Form(None),
@@ -122,7 +133,6 @@ async def update_company_profile(
 
     new_photo_url = None
     if photo:
-        # save new, then delete old (to avoid data loss if save fails)
         new_photo_url = _save_photo(company_id, photo)
         _delete_photo_url(prof.photo_url)
         prof.photo_url = new_photo_url
@@ -134,10 +144,13 @@ async def update_company_profile(
     db.refresh(prof)
     return prof
 
-# ---------------------------
-# DELETE COMPANY PROFILE — auth required (cleans up stored photo)
-# ---------------------------
-@router.delete("/profiles/{company_id}", status_code=204)
+# DELETE COMPANY PROFILE
+@router.delete(
+    "/profiles/{company_id}",
+    status_code=204,
+    summary="Delete your company profile",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Company profile not found"}},
+)
 def delete_company_profile(
     company_id: int,
     db: Session = Depends(get_db),
@@ -153,18 +166,20 @@ def delete_company_profile(
     db.commit()
 
 # ---------------------------
-# JOBS (auth checks on mutations)
+# JOBS
 # ---------------------------
-@router.post("/jobs", response_model=schemas.CompanyJobRead)
+@router.post(
+    "/jobs",
+    response_model=schemas.CompanyJobRead,
+    summary="Create a job posting",
+    description="Skills must be valid Skill IDs. Embedding is computed automatically.",
+)
 def create_job(
     job: schemas.CompanyJobCreate,
     db: Session = Depends(get_db),
     current: models.User = Depends(auth.get_current_user),
-    company_id: Optional[int] = Query(None, description="Optional company/user id; defaults to current user"),
 ):
-    cid = company_id if company_id is not None else current.user_id
-    if current.user_id != cid:
-        raise HTTPException(403, "You can only create jobs for your own company")
+    cid = current.user_id
     company_job = models.CompanyJob(
         company_id=cid,
         job_title=job.job_title,
@@ -188,14 +203,24 @@ def create_job(
     db.refresh(company_job)
     return company_job
 
-@router.get("/jobs/{job_id}", response_model=schemas.CompanyJobRead)
+@router.get(
+    "/jobs/{job_id}",
+    response_model=schemas.CompanyJobRead,
+    summary="Get a job posting",
+    responses={404: {"description": "Job not found"}},
+)
 def get_job(job_id: int, db: Session = Depends(get_db)):
     job = db.get(models.CompanyJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     return job
 
-@router.get("/jobs", response_model=schemas.PageJob)
+@router.get(
+    "/jobs",
+    response_model=schemas.PageJob,
+    summary="List jobs with filters",
+    description="Filter by `company_id` and/or `category`, and full-text search with `q`.",
+)
 def list_jobs(
     db: Session = Depends(get_db),
     q: Optional[str] = Query(None, description="search in title/description/category"),
@@ -230,7 +255,12 @@ def list_jobs(
         items=items,
     )
 
-@router.put("/jobs/{job_id}", response_model=schemas.CompanyJobRead)
+@router.put(
+    "/jobs/{job_id}",
+    response_model=schemas.CompanyJobRead,
+    summary="Update a job posting",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Job not found"}},
+)
 def update_job(
     job_id: int,
     patch: schemas.CompanyJobUpdate,
@@ -269,7 +299,12 @@ def update_job(
     db.refresh(job)
     return job
 
-@router.delete("/jobs/{job_id}", status_code=204)
+@router.delete(
+    "/jobs/{job_id}",
+    status_code=204,
+    summary="Delete a job posting",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Job not found"}},
+)
 def delete_job(
     job_id: int,
     db: Session = Depends(get_db),
@@ -283,17 +318,19 @@ def delete_job(
     db.delete(job)
     db.commit()
 
-@router.get("/my_jobs", response_model=schemas.PageJob)
+@router.get(
+    "/my_jobs",
+    response_model=schemas.PageJob,
+    summary="List my company's jobs",
+    description="Uses the authenticated user's ID; pagination with `page` and `per_page`.",
+)
 def list_my_jobs(
     db: Session = Depends(get_db),
     current: models.User = Depends(auth.get_current_user),
-    company_id: int = Query(..., description="company/user id to filter by"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=100),
 ):
-    if current.user_id != company_id:
-        raise HTTPException(403, "You can only view your own company's jobs")
-    stmt = select(models.CompanyJob).where(models.CompanyJob.company_id == company_id)
+    stmt = select(models.CompanyJob).where(models.CompanyJob.company_id == current.user_id)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.execute(
         stmt.order_by(models.CompanyJob.job_id.desc())

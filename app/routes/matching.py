@@ -77,7 +77,7 @@ def _coverage_candidate_vs_job(db: Session, candidate_id: int, job_id: int) -> T
     job_skill_ids = set(_job_skill_ids(db, job_id))
     cand_skill_ids = set(_candidate_skill_ids(db, candidate_id))
     if not job_skill_ids or not cand_skill_ids:
-        return 0.0, [], list(job_skill_ids)  # default -> 0.0
+        return 0.0, [], list(job_skill_ids)
     matched = sorted(job_skill_ids & cand_skill_ids)
     missing = sorted(job_skill_ids - cand_skill_ids)
     coverage = len(matched) / max(1, len(job_skill_ids))
@@ -87,13 +87,19 @@ def _coverage_job_vs_candidate(db: Session, job_id: int, candidate_id: int) -> f
     job_skill_ids = set(_job_skill_ids(db, job_id))
     cand_skill_ids = set(_candidate_skill_ids(db, candidate_id))
     if not job_skill_ids or not cand_skill_ids:
-        return 0.0  # default -> 0.0
+        return 0.0
     return len(job_skill_ids & cand_skill_ids) / max(1, len(cand_skill_ids))
 
 SIM_WEIGHT = 0.7
 COV_WEIGHT = 0.3
 
-@router.get("/pair/{candidate_id}/{job_id}", response_model=schemas.MatchResponse)
+@router.get(
+    "/pair/{candidate_id}/{job_id}",
+    response_model=schemas.MatchResponse,
+    summary="Match a candidate and a job",
+    description="Computes similarity, coverage, combined fit, and gives short evidence snippets.",
+    responses={404: {"description": "Candidate or job not found"}},
+)
 def match_candidate(candidate_id: int, job_id: int, db: Session = Depends(get_db)):
     candidate = db.get(models.CandidateProfile, candidate_id)
     job = db.get(models.CompanyJob, job_id)
@@ -142,10 +148,16 @@ def match_candidate(candidate_id: int, job_id: int, db: Session = Depends(get_db
         evidence=schemas.Evidence(job_mentions=job_hits, resume_mentions=resume_hits),
     )
 
-@router.get("/top_jobs/{candidate_id}", response_model=List[schemas.JobRecommendation])
+@router.get(
+    "/top_jobs/{candidate_id}",
+    response_model=List[schemas.JobRecommendation],
+    summary="Top job recommendations for a candidate",
+    description="Returns top-N jobs ranked by a weighted fit of semantic similarity and skill coverage.",
+    responses={404: {"description": "Candidate not found"}},
+)
 def top_jobs_for_candidate(
     candidate_id: int,
-    n: int = Query(10, ge=1, le=100),
+    n: int = Query(10, ge=1, le=100, description="How many recommendations to return"),
     db: Session = Depends(get_db),
 ):
     candidate = db.get(models.CandidateProfile, candidate_id)
@@ -182,10 +194,16 @@ def top_jobs_for_candidate(
         for fit, sim, cov, j in recs[:n]
     ]
 
-@router.get("/top_candidates/{job_id}", response_model=List[schemas.CandidateRecommendation])
+@router.get(
+    "/top_candidates/{job_id}",
+    response_model=List[schemas.CandidateRecommendation],
+    summary="Top candidate recommendations for a job",
+    description="Returns top-N candidates ranked by a weighted fit of semantic similarity and skill coverage.",
+    responses={404: {"description": "Job not found"}},
+)
 def top_candidates_for_job(
     job_id: int,
-    n: int = Query(10, ge=1, le=100),
+    n: int = Query(10, ge=1, le=100, description="How many recommendations to return"),
     db: Session = Depends(get_db),
 ):
     job = db.get(models.CompanyJob, job_id)

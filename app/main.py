@@ -8,10 +8,29 @@ import os
 
 Base.metadata.create_all(bind=engine)
 
-# ensure uploads root exists for static serving
 os.makedirs("uploads", exist_ok=True)
 
-app = FastAPI(title=settings.PROJECT_NAME, version=settings.VERSION)
+tags_metadata = [
+    {"name": "users", "description": "Register, login, and obtain bearer tokens."},
+    {"name": "candidates", "description": "Candidate profile CRUD and CV upload."},
+    {"name": "companies", "description": "Company profile and job postings (logo upload supported)."},
+    {"name": "skills", "description": "Skill catalog (typically ESCO-derived)."},
+    {"name": "matching", "description": "Semantic matching and recommendations between candidates and jobs."},
+]
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description=(
+        "CARE API\n\n"
+        "**Auth**: Click **Authorize** and use `Bearer <access_token>` from `/users/login`.\n"
+        "**Roles**: `candidate` or `company`.\n"
+        "IDs derived from the bearer token are not accepted from clients on mutation endpoints."
+    ),
+    openapi_tags=tags_metadata,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,6 +49,6 @@ app.include_router(companies)
 app.include_router(skills)
 app.include_router(matching)
 
-@app.get("/")
+@app.get("/", summary="Health check", tags=["users"])
 def root():
     return {"message": "CARE Backend API is running"}

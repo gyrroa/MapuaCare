@@ -49,11 +49,14 @@ def _skill_names_for_candidate(db: Session, candidate_id: int) -> list[str]:
         .filter(models.CandidateSkill.candidate_id == candidate_id)
         .all()
     )
-    # Each row is a tuple like ('Python',)
     return [r[0] for r in rows]
 
-# 1) CV Upload (extract only) — cleanup temp file
-@router.post("/upload_cv")
+# 1) CV Upload (extract only)
+@router.post(
+    "/upload_cv",
+    summary="Upload CV (PDF/DOCX) and extract text + naive skills",
+    description="Returns raw text and a simple skill hit list based on ESCO labels.",
+)
 async def upload_cv(file: UploadFile = File(...)):
     suffix = os.path.splitext(file.filename)[-1].lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -74,22 +77,27 @@ async def upload_cv(file: UploadFile = File(...)):
     skills = skill_extractor.extract_skills_from_text(text)
     return {"resume_text": text, "skills_found": skills}
 
-# 2) Create profile (auth + existence checks)
-@router.post("/profile", response_model=schemas.CandidateProfileRead)
+# 2) Create profile — uses current.user_id
+@router.post(
+    "/profile",
+    response_model=schemas.CandidateProfileRead,
+    summary="Create your candidate profile",
+    description="Uses the authenticated user's ID; do **not** send user_id.",
+    responses={400: {"description": "Profile already exists"}, 404: {"description": "User not found"}},
+)
 def create_profile(
     profile: schemas.CandidateProfileCreate,
     db: Session = Depends(get_db),
     current: models.User = Depends(auth.get_current_user),
 ):
-    if current.user_id != profile.user_id:
-        raise HTTPException(403, "You can only create your own profile")
-    if not db.get(models.User, profile.user_id):
+    uid = current.user_id
+    if not db.get(models.User, uid):
         raise HTTPException(404, "User not found")
-    if db.get(models.CandidateProfile, profile.user_id):
+    if db.get(models.CandidateProfile, uid):
         raise HTTPException(400, "Candidate profile already exists")
 
     candidate = models.CandidateProfile(
-        candidate_id=profile.user_id,
+        candidate_id=uid,
         full_name=profile.full_name,
         contact_number=profile.contact_number,
         college_program=profile.college_program,
@@ -100,7 +108,7 @@ def create_profile(
     db.add(candidate)
     db.flush()
     if profile.skills:
-        _link_candidate_skills_from_names(db, profile.user_id, profile.skills)
+        _link_candidate_skills_from_names(db, uid, profile.skills)
     db.commit()
     db.refresh(candidate)
 
@@ -115,7 +123,13 @@ def create_profile(
     )
 
 # 3) Get one (returns skill_names)
-@router.get("/profiles/{candidate_id}", response_model=schemas.CandidateProfileRead)
+@router.get(
+    "/profiles/{candidate_id}",
+    response_model=schemas.CandidateProfileRead,
+    summary="Get a candidate profile",
+    description="Public read.",
+    responses={404: {"description": "Candidate not found"}},
+)
 def get_profile(candidate_id: int, db: Session = Depends(get_db)):
     c = db.get(models.CandidateProfile, candidate_id)
     if not c:
@@ -130,8 +144,13 @@ def get_profile(candidate_id: int, db: Session = Depends(get_db)):
         skill_names=_skill_names_for_candidate(db, c.candidate_id),
     )
 
-# 4) List with search/pagination (returns skill_names)
-@router.get("/profiles", response_model=schemas.PageCandidate)
+# 4) List with search/pagination
+@router.get(
+    "/profiles",
+    response_model=schemas.PageCandidate,
+    summary="List candidate profiles",
+    description="Search in name/resume with `q`. Returns skill names for each candidate.",
+)
 def list_profiles(
     db: Session = Depends(get_db),
     q: Optional[str] = Query(None, description="search in name/resume"),
@@ -170,7 +189,12 @@ def list_profiles(
     )
 
 # 5) Update (auth: owner only)
-@router.put("/profiles/{candidate_id}", response_model=schemas.CandidateProfileRead)
+@router.put(
+    "/profiles/{candidate_id}",
+    response_model=schemas.CandidateProfileRead,
+    summary="Update your candidate profile",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Candidate not found"}},
+)
 def update_profile(
     candidate_id: int,
     patch: schemas.CandidateProfileUpdate,
@@ -206,7 +230,12 @@ def update_profile(
     )
 
 # 6) Delete (auth: owner only)
-@router.delete("/profiles/{candidate_id}", status_code=204)
+@router.delete(
+    "/profiles/{candidate_id}",
+    status_code=204,
+    summary="Delete your candidate profile",
+    responses={403: {"description": "Forbidden"}, 404: {"description": "Candidate not found"}},
+)
 def delete_profile(
     candidate_id: int,
     db: Session = Depends(get_db),

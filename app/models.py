@@ -14,6 +14,8 @@ class User(Base):
     candidate_profile = relationship("CandidateProfile", uselist=False, back_populates="user")
     company_profile = relationship("CompanyProfile", uselist=False, back_populates="user")
     jobs = relationship("CompanyJob", back_populates="company")
+    # NEW: refresh tokens
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
 
 class CandidateProfile(Base):
     __tablename__ = "candidate_profiles"
@@ -29,7 +31,7 @@ class CandidateProfile(Base):
     skills = relationship(
         "CandidateSkill",
         back_populates="candidate",
-        cascade="all, delete-orphan"  # cascade cleanup
+        cascade="all, delete-orphan"
     )
 
 class CompanyProfile(Base):
@@ -69,7 +71,7 @@ class CompanyJob(Base):
     skills = relationship(
         "JobSkill",
         back_populates="job",
-        cascade="all, delete-orphan"  # cascade cleanup
+        cascade="all, delete-orphan"
     )
 
 class JobSkill(Base):
@@ -97,3 +99,17 @@ class MatchExplanation(Base):
     matched_skills = Column(Text)
     missing_skills = Column(Text)
     summary_text = Column(Text)
+
+# NEW: persisted refresh tokens (hashed)
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    token_id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
+    jti = Column(String, unique=True, index=True, nullable=False)  # token id (uuid hex)
+    token_hash = Column(String, nullable=False)  # sha256 of the raw refresh token
+    expires_at = Column(DateTime, nullable=False)
+    revoked = Column(Boolean, default=False)
+    replaced_by_jti = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="refresh_tokens")

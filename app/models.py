@@ -27,12 +27,12 @@ class CandidateProfile(Base):
     resume_text = Column(Text, nullable=True)
     embedding_vector = Column(Text, nullable=True)  # JSON
 
+    # NEW
+    photo_url = Column(String, nullable=True)
+    resume_file_url = Column(String, nullable=True)
+
     user = relationship("User", back_populates="candidate_profile")
-    skills = relationship(
-        "CandidateSkill",
-        back_populates="candidate",
-        cascade="all, delete-orphan"
-    )
+    skills = relationship("CandidateSkill", back_populates="candidate", cascade="all, delete-orphan")
 
 class CompanyProfile(Base):
     __tablename__ = "company_profiles"

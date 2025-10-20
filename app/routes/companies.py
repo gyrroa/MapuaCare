@@ -1,15 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, or_
-from typing import Optional
+from typing import Optional, Tuple
 from .. import models, schemas, database, auth
 from ..services import embedding
 import json
 import os
 import uuid
+import mimetypes
+
+# Supabase (Python v2)  ->  pip install supabase
+from supabase import create_client, Client
 
 router = APIRouter(prefix="/company", tags=["companies"])
 
+# ---------- DB ----------
 def get_db():
     db = database.SessionLocal()
     try:
@@ -17,6 +22,75 @@ def get_db():
     finally:
         db.close()
 
+# ---------- Supabase config ----------
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/ANON in environment")
+
+def _sb() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Single bucket "files", with folder prefixes
+BUCKET_NAME = os.getenv("SUPABASE_BUCKET", "files")
+FOLDER_COMPANY_PHOTOS = os.getenv("SUPABASE_FOLDER_COMPANY_PHOTOS", "company_photos")
+
+PHOTO_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+def _split_public_url(url: str) -> Optional[Tuple[str, str]]:
+    """
+    Given a public URL like:
+      https://<project>.supabase.co/storage/v1/object/public/<bucket>/<path>
+    return (bucket, path)
+    """
+    if not url:
+        return None
+    marker = "/storage/v1/object/public/"
+    if marker not in url:
+        return None
+    after = url.split(marker, 1)[1]  # "bucket/path..."
+    parts = after.split("/", 1)
+    if len(parts) != 2:
+        return None
+    return parts[0], parts[1]
+
+async def _upload_company_photo(user_id: int, photo: UploadFile) -> str:
+    ext = os.path.splitext(photo.filename or "")[-1].lower()
+    if ext not in PHOTO_EXTS:
+        raise HTTPException(400, f"Unsupported image type. Allowed: {', '.join(sorted(PHOTO_EXTS))}")
+    content_type = photo.content_type or mimetypes.guess_type(photo.filename or "")[0] or "application/octet-stream"
+    object_path = f"{FOLDER_COMPANY_PHOTOS}/{user_id}/{uuid.uuid4().hex}{ext}"
+
+    client = _sb()
+    content = await photo.read()
+    if not content:
+        raise HTTPException(400, "Empty upload")
+
+    client.storage.from_(BUCKET_NAME).upload(
+        object_path,
+        content,
+        {
+            "contentType": content_type,
+            "cacheControl": "31536000",
+            # no "upsert" (unique path)
+        },
+    )
+    return client.storage.from_(BUCKET_NAME).get_public_url(object_path)
+
+def _delete_photo_url(photo_url: Optional[str]):
+    if not photo_url:
+        return
+    parsed = _split_public_url(photo_url)
+    if not parsed:
+        return
+    bucket, path = parsed
+    try:
+        _sb().storage.from_(bucket).remove([path])
+    except Exception:
+        # best-effort only
+        pass
+
+# ---------- Compose job text for embeddings ----------
 def _compose_job_text(db: Session, job: models.CompanyJob) -> str:
     skill_names = [
         s.preferred_label for s in db.query(models.Skill.preferred_label)
@@ -33,30 +107,6 @@ def _compose_job_text(db: Session, job: models.CompanyJob) -> str:
     ]
     return "\n".join([p for p in parts if p])
 
-def _save_photo(user_id: int, photo: UploadFile) -> str:
-    ext = os.path.splitext(photo.filename)[-1].lower()
-    if ext not in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
-        raise HTTPException(400, "Unsupported image type")
-    upload_root = os.path.join(os.getcwd(), "uploads", "company_photos")
-    os.makedirs(upload_root, exist_ok=True)
-    fname = f"company_{user_id}_{uuid.uuid4().hex}{ext}"
-    fpath = os.path.join(upload_root, fname)
-    with open(fpath, "wb") as f:
-        f.write(photo.file.read())
-    return f"/static/company_photos/{fname}"
-
-def _delete_photo_url(photo_url: Optional[str]):
-    if not photo_url:
-        return
-    if photo_url.startswith("/static/"):
-        rel = photo_url.replace("/static/", "", 1)
-        fpath = os.path.join(os.getcwd(), "uploads", rel)
-        try:
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-        except Exception:
-            pass
-
 # ---------------------------
 # CREATE COMPANY PROFILE
 # ---------------------------
@@ -64,7 +114,7 @@ def _delete_photo_url(photo_url: Optional[str]):
     "/profile",
     response_model=schemas.CompanyProfileRead,
     summary="Create your company profile",
-    description="Uses the authenticated user's ID; optional logo upload (png/jpg/jpeg/gif/webp).",
+    description="Uses the authenticated user's ID; optional logo upload (png/jpg/jpeg/gif/webp) stored in Supabase.",
     responses={400: {"description": "Already exists / invalid role"}, 404: {"description": "User not found"}},
 )
 async def create_company_profile(
@@ -82,7 +132,10 @@ async def create_company_profile(
     if db.get(models.CompanyProfile, uid):
         raise HTTPException(400, "Company profile already exists")
 
-    photo_url = _save_photo(uid, photo) if photo else None
+    photo_url: Optional[str] = None
+    if photo:
+        photo_url = await _upload_company_photo(uid, photo)
+
     prof = models.CompanyProfile(
         company_id=uid,
         company_name=company_name,
@@ -111,7 +164,7 @@ def get_company_profile(company_id: int, db: Session = Depends(get_db)):
     "/profiles/{company_id}",
     response_model=schemas.CompanyProfileRead,
     summary="Update your company profile",
-    description="Optionally upload a new logo or remove the existing one.",
+    description="Optionally upload a new logo to Supabase or remove the existing one.",
     responses={403: {"description": "Forbidden"}, 404: {"description": "Company profile not found"}},
 )
 async def update_company_profile(
@@ -131,11 +184,10 @@ async def update_company_profile(
     if company_name is not None:
         prof.company_name = company_name
 
-    new_photo_url = None
     if photo:
-        new_photo_url = _save_photo(company_id, photo)
+        new_url = await _upload_company_photo(company_id, photo)
         _delete_photo_url(prof.photo_url)
-        prof.photo_url = new_photo_url
+        prof.photo_url = new_url
     elif remove_photo:
         _delete_photo_url(prof.photo_url)
         prof.photo_url = None

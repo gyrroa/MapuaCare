@@ -42,7 +42,10 @@ class CandidateProfileRead(BaseModel):
     college_program: Optional[str] = None
     batch_year: Optional[int] = None
     resume_text: Optional[str] = None
+    photo_url: Optional[str] = None          
+    resume_file_url: Optional[str] = None   
     skill_names: List[str] = []
+
     class Config:
         from_attributes = True
 

@@ -9,7 +9,7 @@ import os
 import uuid
 import mimetypes
 
-# Supabase (Python v2)  ->  pip install supabase
+# Supabase (Python v2)  ->  pip install supabase
 from supabase import create_client, Client
 
 router = APIRouter(prefix="/company", tags=["companies"])
@@ -108,17 +108,19 @@ def _compose_job_text(db: Session, job: models.CompanyJob) -> str:
     return "\n".join([p for p in parts if p])
 
 # ---------------------------
-# CREATE COMPANY PROFILE
+# CREATE COMPANY PROFILE (UPDATED - Now using 'location' only)
 # ---------------------------
 @router.post(
     "/profile",
     response_model=schemas.CompanyProfileRead,
     summary="Create your company profile",
-    description="Uses the authenticated user's ID; optional logo upload (png/jpg/jpeg/gif/webp) stored in Supabase.",
+    description="Uses the authenticated user's ID; optional logo upload (png/jpg/jpeg/gif/webp) stored in Supabase. Only requires name, location, and optional photo.",
     responses={400: {"description": "Already exists / invalid role"}, 404: {"description": "User not found"}},
 )
 async def create_company_profile(
     company_name: str = Form(...),
+    location: Optional[str] = Form(None),
+    # --------------------------------------------------------------------
     photo: Optional[UploadFile] = File(None, description="optional company photo/logo"),
     db: Session = Depends(get_db),
     current: models.User = Depends(auth.get_current_user),
@@ -139,6 +141,7 @@ async def create_company_profile(
     prof = models.CompanyProfile(
         company_id=uid,
         company_name=company_name,
+        location=location,
         photo_url=photo_url,
     )
     db.add(prof)
@@ -159,7 +162,45 @@ def get_company_profile(company_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Company profile not found")
     return prof
 
-# UPDATE COMPANY PROFILE
+# READ ALL (public)
+@router.get(
+    "/profiles",
+    response_model=schemas.PageCompany,
+    summary="List company profiles",
+    description="Search in company name with `q`. Returns company details.",
+)
+def list_company_profiles(
+    db: Session = Depends(get_db),
+    q: Optional[str] = Query(None, description="search in company name"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+):
+    stmt = select(models.CompanyProfile)
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(models.CompanyProfile.company_name.ilike(like))
+    
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    raw_items = db.execute(
+        stmt.order_by(models.CompanyProfile.company_id.desc())
+             .offset((page - 1) * per_page)
+             .limit(per_page)
+    ).scalars().all()
+
+    items = [
+        schemas.CompanyProfileRead(
+            company_id=comp.company_id,
+            company_name=comp.company_name,
+            location=comp.location,
+        ) for comp in raw_items
+    ]
+
+    return schemas.PageCompany(
+        meta=schemas.PageMeta(page=page, per_page=per_page, total=total or 0),
+        items=items,
+    )
+
+# UPDATE COMPANY PROFILE (UPDATED - Now using 'location' only)
 @router.put(
     "/profiles/{company_id}",
     response_model=schemas.CompanyProfileRead,
@@ -170,6 +211,8 @@ def get_company_profile(company_id: int, db: Session = Depends(get_db)):
 async def update_company_profile(
     company_id: int,
     company_name: Optional[str] = Form(None),
+    location: Optional[str] = Form(None),
+    # --------------------------------------------------------------------
     photo: Optional[UploadFile] = File(None, description="optional new photo"),
     remove_photo: Optional[bool] = Form(False),
     db: Session = Depends(get_db),
@@ -183,6 +226,10 @@ async def update_company_profile(
 
     if company_name is not None:
         prof.company_name = company_name
+    # --- CHANGED: Update 'location' field only. ---
+    if location is not None:
+        prof.location = location
+    # ---------------------------------------------
 
     if photo:
         new_url = await _upload_company_photo(company_id, photo)
@@ -298,8 +345,8 @@ def list_jobs(
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.execute(
         stmt.order_by(models.CompanyJob.job_id.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
+             .offset((page - 1) * per_page)
+             .limit(per_page)
     ).scalars().all()
 
     return schemas.PageJob(
@@ -386,10 +433,48 @@ def list_my_jobs(
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.execute(
         stmt.order_by(models.CompanyJob.job_id.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
+             .offset((page - 1) * per_page)
+             .limit(per_page)
     ).scalars().all()
     return schemas.PageJob(
+        meta=schemas.PageMeta(page=page, per_page=per_page, total=total or 0),
+        items=items,
+    )
+
+# NEW: Endpoint for companies to see the candidates who applied to a specific job
+@router.get(
+    "/job/{job_id}/applicants",
+    response_model=schemas.PageCandidate,
+    summary="List candidates who applied to a job",
+    description="Returns the candidates who applied to a specific job.",
+)
+def get_job_applicants(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current: models.User = Depends(auth.get_current_user),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+):
+    # Get the job details and ensure the company user owns the job
+    job = db.get(models.CompanyJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.company_id != current.user_id:
+        raise HTTPException(403, "You can only see applicants for your own jobs")
+
+    # Query the candidates who applied to this job
+    stmt = select(models.CandidateProfile).join(
+        models.JobApplication, models.JobApplication.candidate_id == models.CandidateProfile.candidate_id
+    ).where(models.JobApplication.job_id == job_id)
+
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    items = db.execute(
+        stmt.order_by(models.CandidateProfile.candidate_id.desc())
+             .offset((page - 1) * per_page)
+             .limit(per_page)
+    ).scalars().all()
+
+    return schemas.PageCandidate(
         meta=schemas.PageMeta(page=page, per_page=per_page, total=total or 0),
         items=items,
     )

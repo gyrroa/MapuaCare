@@ -34,10 +34,14 @@ class CandidateProfile(Base):
     user = relationship("User", back_populates="candidate_profile")
     skills = relationship("CandidateSkill", back_populates="candidate", cascade="all, delete-orphan")
 
+    # NEW: Track job applications for the candidate
+    applications = relationship("JobApplication", back_populates="candidate")
+
 class CompanyProfile(Base):
     __tablename__ = "company_profiles"
     company_id = Column(Integer, ForeignKey("users.user_id"), primary_key=True)
     company_name = Column(String, nullable=False)
+    location = Column(String, nullable=True)
     photo_url = Column(String, nullable=True)
 
     user = relationship("User", back_populates="company_profile")
@@ -73,6 +77,9 @@ class CompanyJob(Base):
         back_populates="job",
         cascade="all, delete-orphan"
     )
+
+    # NEW: Track job applications for the job
+    applications = relationship("JobApplication", back_populates="job")
 
 class JobSkill(Base):
     __tablename__ = "job_skills"
@@ -113,3 +120,14 @@ class RefreshToken(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="refresh_tokens")
+
+# NEW: Job Application Model to track candidates applying to jobs
+class JobApplication(Base):
+    __tablename__ = "job_applications"
+    application_id = Column(Integer, primary_key=True, index=True)  # Unique ID for each application
+    candidate_id = Column(Integer, ForeignKey("candidate_profiles.candidate_id"))  # Candidate ID
+    job_id = Column(Integer, ForeignKey("company_jobs.job_id"))  # Job ID being applied to
+    applied_at = Column(DateTime, default=datetime.utcnow)  # Date and time of application
+
+    candidate = relationship("CandidateProfile", back_populates="applications")  # Link to candidate profile
+    job = relationship("CompanyJob", back_populates="applications")  # Link to company job

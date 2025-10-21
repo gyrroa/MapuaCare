@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field, constr
 from typing import List, Optional
+from datetime import datetime
 
 # ---------- Users ----------
 class UserCreate(BaseModel):
@@ -53,6 +54,7 @@ class CandidateProfileRead(BaseModel):
 class CompanyProfileRead(BaseModel):
     company_id: int
     company_name: str
+    location: Optional[str] = None
     photo_url: Optional[str] = None
     class Config:
         from_attributes = True
@@ -142,6 +144,31 @@ class PageCandidate(BaseModel):
     meta: PageMeta
     items: List[CandidateProfileRead]
 
+class PageCompany(BaseModel):
+    meta: PageMeta
+    items: List[CompanyProfileRead]
+
 class PageSkill(BaseModel):
     meta: PageMeta
     items: List[SkillRead]
+
+# NEW: Schema for job application details
+class JobApplicationRead(BaseModel):
+    application_id: int  # Application ID
+    candidate_id: int  # Candidate ID
+    job_id: int  # Job ID
+    applied_at: datetime  # When the application was made
+
+    class Config:
+        from_attributes = True
+
+# NEW: Schema for job application data shown to the candidate
+class CandidateJobApplicationRead(BaseModel):
+    candidate_id: int  # Candidate ID
+    job_id: int  # Job ID
+    applied_at: datetime  # Date and time the application was made
+
+# NEW: Pagination schema for job applications
+class PageJobApplication(BaseModel):
+    meta: PageMeta  # Pagination metadata
+    items: List[JobApplicationRead]  # List of job application records

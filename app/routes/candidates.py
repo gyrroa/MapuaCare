@@ -462,3 +462,75 @@ def delete_profile(
 
     db.delete(c)
     db.commit()
+
+# NEW: Endpoint to allow candidates to apply or unapply to a job
+@router.post(
+    "/apply_job/{job_id}",
+    summary="Apply or unapply to a job",
+    description="A candidate can apply or unapply to a job. Returns status if applied or unapplied.",
+)
+async def apply_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current: models.User = Depends(auth.get_current_user),
+):
+    # Get the candidate profile
+    candidate_profile = db.get(models.CandidateProfile, current.user_id)
+    if not candidate_profile:
+        raise HTTPException(404, "Candidate profile not found")
+
+    # Check if the candidate is already applied to the job
+    application = db.query(models.JobApplication).filter(
+        models.JobApplication.candidate_id == candidate_profile.candidate_id,
+        models.JobApplication.job_id == job_id,
+    ).first()
+
+    if application:
+        # If already applied, unapply by deleting the application
+        db.delete(application)
+        db.commit()
+        return {"status": "unapplied"}
+    else:
+        # If not applied yet, apply to the job by creating a new application
+        new_application = models.JobApplication(
+            candidate_id=candidate_profile.candidate_id,
+            job_id=job_id,
+        )
+        db.add(new_application)
+        db.commit()
+        return {"status": "applied"}
+    
+# NEW: Endpoint to list the jobs the candidate has applied to
+@router.get(
+    "/my_applied_jobs",
+    response_model=schemas.PageJob,
+    summary="List jobs the candidate has applied to",
+    description="Returns the jobs a candidate has applied to.",
+)
+def get_applied_jobs(
+    db: Session = Depends(get_db),
+    current: models.User = Depends(auth.get_current_user),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+):
+    # Get the candidate profile
+    candidate_profile = db.get(models.CandidateProfile, current.user_id)
+    if not candidate_profile:
+        raise HTTPException(404, "Candidate profile not found")
+
+    # Query jobs applied to by the candidate
+    stmt = select(models.CompanyJob).join(
+        models.JobApplication, models.JobApplication.job_id == models.CompanyJob.job_id
+    ).where(models.JobApplication.candidate_id == candidate_profile.candidate_id)
+
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    items = db.execute(
+        stmt.order_by(models.CompanyJob.job_id.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+    ).scalars().all()
+
+    return schemas.PageJob(
+        meta=schemas.PageMeta(page=page, per_page=per_page, total=total or 0),
+        items=items,
+    )

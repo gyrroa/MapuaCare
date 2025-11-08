@@ -93,6 +93,14 @@ def _coverage_job_vs_candidate(db: Session, job_id: int, candidate_id: int) -> f
 SIM_WEIGHT = 0.7
 COV_WEIGHT = 0.3
 
+def _candidate_skill_names(db: Session, candidate_id: int) -> List[str]:
+    return db.execute(
+        select(models.Skill.preferred_label)
+        .join(models.CandidateSkill, models.CandidateSkill.skill_id == models.Skill.skill_id)
+        .where(models.CandidateSkill.candidate_id == candidate_id)
+    ).scalars().all()
+
+
 @router.get(
     "/pair/{candidate_id}/{job_id}",
     response_model=schemas.MatchResponse,
@@ -107,18 +115,21 @@ def match_candidate(candidate_id: int, job_id: int, db: Session = Depends(get_db
         raise HTTPException(status_code=404, detail="Not found")
 
     cand_vec = _get_cand_vec(candidate)
-    job_vec = _get_job_vec(job)
+    job_vec  = _get_job_vec(job)
     sim = embedding.cosine_similarity(cand_vec, job_vec)
+
+    # 🔙 DB-driven coverage & matched/missing
     cov, matched_ids, missing_ids = _coverage_candidate_vs_job(db, candidate_id, job_id)
     fit = SIM_WEIGHT * sim + COV_WEIGHT * cov
 
     matched_names = _skill_names_for_ids(db, matched_ids)
     missing_names = _skill_names_for_ids(db, missing_ids)
 
-    job_sents = _tokenize_sentences(job.job_description or "")
+    # Evidence uses the matched skill names
+    job_sents    = _tokenize_sentences(job.job_description or "")
     resume_sents = _tokenize_sentences(candidate.resume_text or "")
-    job_hits = _find_evidence(job_sents, matched_names, max_hits=3)
-    resume_hits = _find_evidence(resume_sents, matched_names, max_hits=3)
+    job_hits     = _find_evidence(job_sents, matched_names, max_hits=3)
+    resume_hits  = _find_evidence(resume_sents, matched_names, max_hits=3)
 
     cov_pct = f"{round(cov*100)}%" if matched_ids or missing_ids else "N/A"
     sim_pct = f"{round(sim*100)}%"
@@ -139,14 +150,15 @@ def match_candidate(candidate_id: int, job_id: int, db: Session = Depends(get_db
 
     return schemas.MatchResponse(
         job_id=job.job_id,
-        fit_score=fit,
+        fit_score=float(fit),
         summary_text=summary_text,
-        sim_score=sim,
-        coverage_score=cov,
+        sim_score=float(sim),
+        coverage_score=float(cov),
         matched_skills=matched_names,
         missing_skills=missing_names,
         evidence=schemas.Evidence(job_mentions=job_hits, resume_mentions=resume_hits),
     )
+
 
 @router.get(
     "/top_jobs/{candidate_id}",
@@ -177,7 +189,10 @@ def top_jobs_for_candidate(
     for r, i in enumerate(idx[:n*5]):
         job = jobs[i]
         sim = float(sims[r])
+
+        # DB-driven coverage (JobSkill ∩ CandidateSkill)
         cov, _, _ = _coverage_candidate_vs_job(db, candidate_id, job.job_id)
+
         fit = SIM_WEIGHT * sim + COV_WEIGHT * cov
         recs.append((fit, sim, cov, job))
 
@@ -223,9 +238,13 @@ def top_candidates_for_job(
     for r, i in enumerate(idx[:n*5]):
         c = cands[i]
         sim = float(sims[r])
+
+        # DB-driven coverage (JobSkill ∩ CandidateSkill) normalized by candidate skills
         cov = _coverage_job_vs_candidate(db, job_id, c.candidate_id)
+
         fit = SIM_WEIGHT * sim + COV_WEIGHT * cov
         recs.append((fit, sim, cov, c))
+
 
     recs.sort(key=lambda t: t[0], reverse=True)
     return [

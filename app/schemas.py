@@ -64,13 +64,13 @@ class CompanyJobCreate(BaseModel):
     job_title: str = Field(..., example="Backend Engineer")
     job_description: str = Field(..., example="Build and maintain REST APIs with FastAPI.")
     job_category: Optional[str] = Field(None, example="Software Engineering")
-    skills: Optional[List[int]] = Field(None, description="Skill IDs from /skills", example=[1, 5, 42])
+    skills: Optional[List[int]] = Field(None, description="Skill IDs from /skills")
 
 class CompanyJobUpdate(BaseModel):
     job_title: Optional[str] = Field(None, example="Senior Backend Engineer")
     job_description: Optional[str] = Field(None, example="Own services and improve performance.")
     job_category: Optional[str] = Field(None, example="Software Engineering")
-    skills: Optional[List[int]] = Field(None, example=[1, 5, 42])
+    skills: Optional[List[int]] = Field(None)
 
 class CompanyJobRead(BaseModel):
     job_id: int

@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, or_
-from typing import Optional, Tuple
 from .. import models, schemas, database, auth
 from ..services import embedding
-import json
+from typing import Optional, Tuple, List
+import re
 import os
+import json
 import uuid
 import mimetypes
+import pandas as pd
+
+
 
 # Supabase (Python v2)  ->  pip install supabase
 from supabase import create_client, Client
@@ -92,20 +96,107 @@ def _delete_photo_url(photo_url: Optional[str]):
 
 # ---------- Compose job text for embeddings ----------
 def _compose_job_text(db: Session, job: models.CompanyJob) -> str:
-    skill_names = [
-        s.preferred_label for s in db.query(models.Skill.preferred_label)
-        .join(models.JobSkill, models.JobSkill.skill_id == models.Skill.skill_id)
-        .filter(models.JobSkill.job_id == job.job_id)
-        .limit(5).all()
-    ]
-    skill_names = [sn[0] if isinstance(sn, tuple) else sn for sn in skill_names]
     parts = [
         (job.job_title or "").strip().lower(),
         (f"category: {job.job_category}" if job.job_category else "").lower(),
-        (f"skills: {', '.join(skill_names)}" if skill_names else ""),
-        (job.job_description or "").strip().lower()
+        (job.job_description or "").strip().lower(),
     ]
     return "\n".join([p for p in parts if p])
+
+# ---------- ESCO-based extraction (no hardcoding) ----------
+def _load_esco_df() -> pd.DataFrame:
+    """
+    Load ESCO skills CSV at app/data/skills_esco.csv
+    """
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # app/
+    skills_path = os.path.join(base_dir, "data", "skills_esco.csv")
+    if not os.path.exists(skills_path):
+        return pd.DataFrame(columns=["conceptUri", "preferredLabel", "altLabels"])
+    return pd.read_csv(skills_path).fillna("")
+
+def _extract_esco_labels(text: str, df: pd.DataFrame, max_hits: int = 50) -> List[str]:
+    """
+    Return distinct preferredLabel values found in text, matching preferredLabel + altLabels
+    Case-insensitive, word-boundary, no hardcoding.
+    """
+    if not text or df.empty:
+        return []
+    tl = (text or "").lower()
+    found = []
+    for _, row in df.iterrows():
+        pref = str(row.get("preferredLabel", "")).strip()
+        if not pref:
+            continue
+        labels = [pref] + [a.strip() for a in str(row.get("altLabels", "")).split(";") if a.strip()]
+        for label in sorted(set(labels), key=len, reverse=True):
+            if not label:
+                continue
+            if re.search(rf"\b{re.escape(label.lower())}\b", tl, flags=re.IGNORECASE):
+                found.append(pref)
+                break
+        if len(found) >= max_hits:
+            break
+    return sorted(set(found), key=str.lower)
+
+def _upsert_skills_and_get_ids(db: Session, labels: List[str]) -> List[int]:
+    """
+    For each preferred label:
+      - if Skill exists (preferred_label ILIKE), return its id
+      - else create Skill(concept_uri='local:<slug>', preferred_label=label)
+    """
+    ids: List[int] = []
+    for label in labels:
+        sid = db.execute(
+            select(models.Skill.skill_id).where(models.Skill.preferred_label.ilike(label))
+        ).scalar()
+        if not sid:
+            concept_uri = f"local:{label.strip().lower().replace(' ', '_')}"
+            skill = models.Skill(concept_uri=concept_uri, preferred_label=label)
+            db.add(skill)
+            db.flush()
+            sid = skill.skill_id
+        ids.append(sid)
+    return ids
+
+def _infer_skill_ids_from_text(db: Session, text: str, max_skills: int = 20) -> List[int]:
+    """
+    Scan 'text' (title/category/description) for skills from Skill table (preferred_label + alt_labels).
+    Returns a de-duplicated list of matching skill_ids (up to max_skills).
+    Matching is case-insensitive with word boundaries.
+    """
+    if not text:
+        return []
+
+    tl = text.lower()
+    rows = db.query(
+        models.Skill.skill_id,
+        models.Skill.preferred_label,
+        models.Skill.alt_labels
+    ).all()
+
+    hits: List[int] = []
+    seen = set()
+
+    for sid, pref, alts in rows:
+        labels = [pref or ""]
+        if alts:
+            labels += [a.strip() for a in str(alts).split(";") if a.strip()]
+
+        # prefer longer phrases first to avoid partial over-matches
+        for label in sorted(set(labels), key=len, reverse=True):
+            if not label:
+                continue
+            # word-boundary, case-insensitive
+            if re.search(rf"\b{re.escape(label.lower())}\b", tl, flags=re.IGNORECASE):
+                if sid not in seen:
+                    seen.add(sid)
+                    hits.append(sid)
+                break  # stop at first alias hit for this skill
+
+        if len(hits) >= max_skills:
+            break
+
+    return hits
 
 # ---------------------------
 # CREATE COMPANY PROFILE (UPDATED - Now using 'location' only)
@@ -273,11 +364,7 @@ def delete_company_profile(
     summary="Create a job posting",
     description="Skills must be valid Skill IDs. Embedding is computed automatically.",
 )
-def create_job(
-    job: schemas.CompanyJobCreate,
-    db: Session = Depends(get_db),
-    current: models.User = Depends(auth.get_current_user),
-):
+def create_job(job: schemas.CompanyJobCreate, db: Session = Depends(get_db), current: models.User = Depends(auth.get_current_user)):
     cid = current.user_id
     company_job = models.CompanyJob(
         company_id=cid,
@@ -288,13 +375,37 @@ def create_job(
     db.add(company_job)
     db.flush()
 
-    if job.skills:
+    # ---------- AUTO SKILLS: explicit IDs win; else infer (DB first, then ESCO -> upsert) ----------
+    if job.skills and len(job.skills) > 0:
+        candidate_ids = job.skills
+    else:
+        composed_for_skills = _compose_job_text(db, company_job)
+
+        # 1) match existing Skill rows (preferred_label + alt_labels)
+        candidate_ids = _infer_skill_ids_from_text(db, composed_for_skills)
+
+        # 2) also extract via ESCO, upsert missing skills into Skill table, then include them
+        df_esco = _load_esco_df()
+        esco_labels = _extract_esco_labels(composed_for_skills, df_esco)
+        if esco_labels:
+            esco_ids = _upsert_skills_and_get_ids(db, esco_labels)
+            # merge and de-dup while preserving order
+            seen = set(candidate_ids)
+            for sid in esco_ids:
+                if sid not in seen:
+                    candidate_ids.append(sid); seen.add(sid)
+    # -----------------------------------------------------------------------------------------------
+
+
+    if candidate_ids:
         valid_ids = [sid for (sid,) in db.execute(
-            select(models.Skill.skill_id).where(models.Skill.skill_id.in_(job.skills))
+            select(models.Skill.skill_id).where(models.Skill.skill_id.in_(candidate_ids))
         ).all()]
         for sid in valid_ids:
             db.add(models.JobSkill(job_id=company_job.job_id, skill_id=sid, required=True))
+    # ------------------------------------------------------------------------
 
+    # Embedding from composed text (title/category/description)
     composed = _compose_job_text(db, company_job)
     company_job.job_embedding_vector = json.dumps(embedding.get_embedding(composed))
 
@@ -360,12 +471,7 @@ def list_jobs(
     summary="Update a job posting",
     responses={403: {"description": "Forbidden"}, 404: {"description": "Job not found"}},
 )
-def update_job(
-    job_id: int,
-    patch: schemas.CompanyJobUpdate,
-    db: Session = Depends(get_db),
-    current: models.User = Depends(auth.get_current_user),
-):
+def update_job(job_id: int, patch: schemas.CompanyJobUpdate, db: Session = Depends(get_db), current: models.User = Depends(auth.get_current_user)):
     job = db.get(models.CompanyJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -377,10 +483,11 @@ def update_job(
         val = getattr(patch, f)
         if val is not None:
             setattr(job, f, val)
-            if f in ("job_title", "job_description", "job_category"):
-                changed = True
+            changed = True
 
+    # ---------- AUTO SKILLS on update ----------
     if patch.skills is not None:
+        # Caller explicitly sets skills -> replace with provided IDs
         db.query(models.JobSkill).filter(models.JobSkill.job_id == job_id).delete()
         if patch.skills:
             valid_ids = [sid for (sid,) in db.execute(
@@ -389,6 +496,28 @@ def update_job(
             for sid in valid_ids:
                 db.add(models.JobSkill(job_id=job.job_id, skill_id=sid, required=True))
         changed = True
+    else:
+        # No explicit skills provided. If text changed, re-infer from new text (DB + ESCO)
+        if changed:
+            db.query(models.JobSkill).filter(models.JobSkill.job_id == job_id).delete()
+            composed_for_skills = _compose_job_text(db, job)
+
+            # 1) existing Skill rows
+            inferred_ids = _infer_skill_ids_from_text(db, composed_for_skills)
+
+            # 2) ESCO detection then upsert new Skills
+            df_esco = _load_esco_df()
+            esco_labels = _extract_esco_labels(composed_for_skills, df_esco)
+            if esco_labels:
+                esco_ids = _upsert_skills_and_get_ids(db, esco_labels)
+                seen = set(inferred_ids)
+                for sid in esco_ids:
+                    if sid not in seen:
+                        inferred_ids.append(sid); seen.add(sid)
+
+            for sid in inferred_ids:
+                db.add(models.JobSkill(job_id=job.job_id, skill_id=sid, required=True))
+    # ------------------------------------------
 
     if changed:
         composed = _compose_job_text(db, job)

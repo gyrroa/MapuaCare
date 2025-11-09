@@ -1,156 +1,201 @@
-import hashlib
-import uuid
-from datetime import datetime, timedelta
-from typing import Optional, Tuple
-
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
+from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from jose import JWTError, jwt
+import os
+from pydantic import BaseModel
 
-from . import models, database
-from .config import settings
+# --- THIS IS THE FIX ---
+# We are importing bcrypt directly
+import bcrypt
+# --- END OF FIX ---
 
-# Password hashing (argon2 + bcrypt)
-_pwd_ctx = CryptContext(
-    schemes=["argon2", "bcrypt"],
-    deprecated="auto",
-)
+from . import models, schemas
+from .database import get_db
 
-def hash_password(password: str) -> str:
-    return _pwd_ctx.hash(password)
+# --- 1. Password Hashing (REMOVED PASSLIB) ---
+# We no longer need pwd_context
 
-def verify_password(password: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(password, hashed)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a plain password against a hashed one using bcrypt."""
+    try:
+        # Encode both to bytes for bcrypt
+        plain_password_bytes = plain_password.encode('utf-8')
+        hashed_password_bytes = hashed_password.encode('utf-8')
+        
+        # Check the password
+        return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
+    except Exception:
+        # Fails on invalid hash format, etc.
+        return False
 
+def get_password_hash(password: str) -> str:
+    """Hashes a plain password using bcrypt."""
+    # Need to encode password to bytes for bcrypt
+    password_bytes = password.encode('utf-8')
+    # Generate a salt and hash the password
+    hashed_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+    # Decode back to string to store in DB
+    return hashed_bytes.decode('utf-8')
+
+# --- 2. JWT Token Configuration ---
+SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_that_you_should_change")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24h
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/login")
 
-def _now_utc() -> datetime:
-    return datetime.utcnow()
+# --- 3. User Authentication ---
+def authenticate_user(db: Session, email: str, password: str) -> Optional[models.User]:
+    """Finds a user by email and verifies their password."""
+    user = db.scalar(select(models.User).where(models.User.email == email))
+    if not user:
+        return None
+    # This will now call our new bcrypt verify_password function
+    if not verify_password(password, user.hashed_password):
+        return None
+    return user
 
-def _hash_token(raw: str) -> str:
-    return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
+# --- 4. Token Creation ---
+class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+# --- vvv THIS IS THE NEW CLASS vvv ---
+# This new schema matches what your frontend (src/features/auth/api.ts) expects
+class LoginResponse(Token):
+    user: schemas.UserRead
+# --- ^^^ THIS IS THE NEW CLASS ^^^ ---
+
+
+def _create_token(data: dict, expires_delta: timedelta) -> str:
+    """Helper to create a JWT token."""
     to_encode = data.copy()
-    if "sub" in to_encode:
-        to_encode["sub"] = str(to_encode["sub"])
-    expire = _now_utc() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire, "type": "access"})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+    expire = datetime.now(timezone.utc) + expires_delta
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def _create_refresh_jwt(user_id: int, jti: str, expires_delta: Optional[timedelta] = None) -> str:
-    expire = _now_utc() + (expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
-    payload = {"sub": str(user_id), "jti": jti, "type": "refresh", "exp": expire}
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
-
-# --- DB helpers for refresh tokens ---
-def issue_token_pair(db: Session, user_id: int) -> Tuple[str, str]:
-    """Create access + refresh tokens and persist the refresh token (hashed)."""
-    access = create_access_token({"sub": user_id})
-    jti = uuid.uuid4().hex
-    refresh = _create_refresh_jwt(user_id, jti)
-    rec = models.RefreshToken(
-        user_id=user_id,
-        jti=jti,
-        token_hash=_hash_token(refresh),
-        expires_at=_now_utc() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-        revoked=False,
+def create_access_and_refresh_tokens(user: models.User, db: Session) -> Token:
+    """Creates both an access token and a refresh token for the user."""
+    # Access token
+    access_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_payload = {
+        "sub": str(user.user_id),
+        "role": user.role,
+        "type": "access",
+    }
+    access_token = _create_token(access_payload, access_expires)
+    
+    # Refresh token
+    refresh_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    refresh_payload = {
+        "sub": str(user.user_id),
+        "type": "refresh",
+    }
+    refresh_token = _create_token(refresh_payload, refresh_expires)
+    
+    # Store the refresh token in the DB using the passed-in session
+    db_token = models.RefreshToken(
+        user_id=user.user_id,
+        token=refresh_token,
+        expires_at=datetime.now(timezone.utc) + refresh_expires
     )
-    db.add(rec)
-    db.commit()
-    return access, refresh
-
-def _decode(token: str) -> dict:
-    return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
-
-def verify_refresh_token(db: Session, token: str) -> models.RefreshToken:
-    cred_exc = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid refresh token",
-        headers={"WWW-Authenticate": "Bearer"},
+    db.add(db_token)
+    
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
     )
-    try:
-        payload = _decode(token)
-        if payload.get("type") != "refresh":
-            raise cred_exc
-        jti = payload.get("jti")
-        sub = payload.get("sub")
-        if not jti or not sub:
-            raise cred_exc
-        user_id = int(sub)
-    except Exception:
-        raise cred_exc
 
-    rec = db.query(models.RefreshToken).filter(models.RefreshToken.jti == jti).first()
-    if not rec or rec.user_id != user_id:
-        raise cred_exc
-    if rec.revoked or rec.expires_at <= _now_utc():
-        raise cred_exc
-    if rec.token_hash != _hash_token(token):
-        # hashed mismatch -> token tampering or DB desync
-        raise cred_exc
-    return rec
-
-def rotate_refresh_token(db: Session, rec: models.RefreshToken) -> str:
-    """Revoke the given record and issue a fresh refresh JWT, persisted."""
-    rec.revoked = True
-    new_jti = uuid.uuid4().hex
-    new_token = _create_refresh_jwt(rec.user_id, new_jti)
-    new_rec = models.RefreshToken(
-        user_id=rec.user_id,
-        jti=new_jti,
-        token_hash=_hash_token(new_token),
-        expires_at=_now_utc() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-        revoked=False,
-    )
-    rec.replaced_by_jti = new_jti
-    db.add(new_rec)
-    db.commit()
-    return new_token
-
-def revoke_refresh_token(db: Session, token: str) -> None:
-    """Revoke a refresh token (used for logout)."""
-    try:
-        payload = _decode(token)
-        jti = payload.get("jti")
-    except Exception:
-        # If it's invalid/expired, treat as already revoked
-        return
-    rec = db.query(models.RefreshToken).filter(models.RefreshToken.jti == jti).first()
-    if rec and not rec.revoked:
-        rec.revoked = True
-        db.commit()
-
-def get_db():
-    db = database.SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> models.User:
-    cred_exc = HTTPException(
+# --- 5. Token Verification and Dependencies ---
+def get_current_user(
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db)
+) -> models.User:
+    """Dependency to get the current authenticated user from an access token."""
+    credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = _decode(token)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        
         if payload.get("type") != "access":
-            raise cred_exc
-        user_id = payload.get("sub")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type, expected 'access'",
+            )
+            
+        user_id: str = payload.get("sub")
         if user_id is None:
-            raise cred_exc
-        user_id = int(user_id)
+            raise credentials_exception
+            
     except JWTError:
-        raise cred_exc
-
-    user = db.get(models.User, user_id)
-    if not user:
-        raise cred_exc
+        raise credentials_exception
+        
+    user = db.get(models.User, int(user_id))
+    if user is None:
+        raise credentials_exception
+        
     return user
+
+# --- 6. Refresh Token Logic ---
+def refresh_access_token(db: Session, refresh_token: str) -> Token:
+    """Generates a new set of tokens from a valid refresh token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid refresh token",
+    )
+    try:
+        payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        
+        if payload.get("type") != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type, expected 'refresh'",
+            )
+            
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+            
+    except JWTError:
+        raise credentials_exception
+    
+    db_token = db.scalar(
+        select(models.RefreshToken).where(
+            models.RefreshToken.token == refresh_token,
+            models.RefreshToken.user_id == int(user_id),
+            models.RefreshToken.expires_at > datetime.now(timezone.utc)
+        )
+    )
+    
+    if not db_token:
+        raise credentials_exception
+        
+    user = db.get(models.User, int(user_id))
+    if not user:
+        raise credentials_exception
+        
+    # Revoke the old refresh token
+    db.delete(db_token)
+    
+    # Issue new tokens (and let the calling endpoint commit)
+    return create_access_and_refresh_tokens(user, db)
+
+def revoke_refresh_token(db: Session, refresh_token: str):
+    """Revokes a refresh token by deleting it from the database."""
+    db_token = db.scalar(
+        select(models.RefreshToken).where(models.RefreshToken.token == refresh_token)
+    )
+    if db_token:
+        db.delete(db_token)
+        db.commit() # This commit is fine, it's a standalone action
+    return

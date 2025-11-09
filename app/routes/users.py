@@ -1,86 +1,180 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from .. import models, schemas, database, auth
+# --- MODIFIED ---
+from ..database import get_db # Import the central get_db
+# ----------------
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-def get_db():
-    db = database.SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# --- REMOVED ---
+# The local get_db() function is no longer needed
+# ---------------
 
+# --- MODIFIED: Import hashing functions from auth ---
+from ..auth import verify_password, get_password_hash
+# ----------------
+
+# ---------------------------
+# CREATE USER
+# ---------------------------
 @router.post(
     "/register",
     response_model=schemas.UserRead,
+    status_code=status.HTTP_201_CREATED,
     summary="Register a new user",
-    description="Create an account. `role` must be **candidate** or **company**.",
-    responses={400: {"description": "Email already registered"}},
+    description="Create a user. Role must be 'candidate' or 'company'.",
 )
-def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    exists = db.query(models.User).filter(models.User.email == user.email).first()
-    if exists:
-        raise HTTPException(400, "Email already registered")
-    hashed = auth.hash_password(user.password)
-    db_user = models.User(email=user.email, password_hash=hashed, role=user.role)
+def create_user(
+    user: schemas.UserCreate,
+    db: Session = Depends(get_db), # <-- Uses central get_db
+):
+    if user.role not in ("candidate", "company"):
+        raise HTTPException(400, "Role must be 'candidate' or 'company'")
+    
+    if db.scalar(select(models.User).where(models.User.email == user.email)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+    
+    hashed_password = get_password_hash(user.password)
+    db_user = models.User(
+        email=user.email,
+        hashed_password=hashed_password,
+        role=user.role,
+    )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     return db_user
 
+# ---------------------------
+# LOGIN
+# ---------------------------
 @router.post(
     "/login",
-    summary="Login and get access + refresh tokens",
-    description=(
-        "Submit `username` (email) and `password` as form fields. "
-        "The response contains a short-lived **access token** and a long-lived **refresh token**. "
-        "Use the access token in `Authorization: Bearer <token>` for authenticated requests."
-    ),
+    # --- vvv CHANGE 1: Update the response_model vvv ---
+    response_model=auth.LoginResponse, 
+    # --- ^^^ CHANGE 1: Update the response_model ^^^ ---
+    summary="User login",
+    description="Get an access token and refresh token.",
 )
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    email = form_data.username
-    password = form_data.password
+def login_for_access_token(
+    form_data: auth.OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db), # <-- Uses central get_db
+):
+    user = auth.authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # --- MODIFIED: Pass the db session ---
+    tokens = auth.create_access_and_refresh_tokens(user, db)
+    
+    # --- THIS IS THE FIX ---
+    db.commit() # Save the new refresh token to the database
+    # -----------------------
 
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user or not auth.verify_password(password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    access_token, refresh_token = auth.issue_token_pair(db, user.user_id)
+    # --- vvv CHANGE 2: Return a dictionary that includes the user vvv ---
     return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "user": {"user_id": user.user_id, "role": user.role},
+        "access_token": tokens.access_token,
+        "refresh_token": tokens.refresh_token,
+        "token_type": tokens.token_type,
+        "user": user  # <-- This is the missing piece
     }
+    # --- ^^^ CHANGE 2: Return a dictionary that includes the user ^^^ ---
 
+
+# ---------------------------
+# GET CURRENT USER
+# ---------------------------
+@router.get(
+    "/me",
+    response_model=schemas.UserRead,
+    summary="Get current user",
+    description="See your own user details.",
+)
+def read_users_me(
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    return current_user
+
+# ---------------------------
+# REFRESH TOKEN
+# ---------------------------
 @router.post(
     "/refresh",
-    summary="Rotate refresh token and issue a new access token",
-    description=(
-        "Send your current `refresh_token` (JWT). "
-        "If valid and not revoked/expired, this returns a **new access token** and a **new refresh token**. "
-        "The old refresh token is revoked."
-    ),
+    response_model=auth.Token,
+    summary="Refresh access token",
+    description="Get a new access token using a refresh token.",
 )
-def refresh(body: schemas.RefreshRequest, db: Session = Depends(get_db)):
-    rec = auth.verify_refresh_token(db, body.refresh_token)
-    # rotate refresh token and issue a new access
-    new_refresh = auth.rotate_refresh_token(db, rec)
-    new_access = auth.create_access_token({"sub": rec.user_id})
-    return {
-        "access_token": new_access,
-        "refresh_token": new_refresh,
-        "token_type": "bearer",
-        "user": {"user_id": rec.user_id},
-    }
+def refresh_token(
+    payload: schemas.RefreshRequest,
+    db: Session = Depends(get_db), # <-- Uses central get_db
+):
+    # --- MODIFIED: Pass the db session ---
+    new_tokens = auth.refresh_access_token(db, payload.refresh_token)
+    db.commit() # Commit the token revocation/creation
+    return new_tokens
 
+# ---------------------------
+# LOGOUT
+# ---------------------------
 @router.post(
     "/logout",
-    summary="Logout (revoke a refresh token)",
-    description="Provide the `refresh_token` to revoke it. Access tokens simply expire.",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Logout (Revoke Refresh Token)",
+    description="Revokes the provided refresh token. Client must delete tokens.",
 )
-def logout(body: schemas.LogoutRequest, db: Session = Depends(get_db)):
-    auth.revoke_refresh_token(db, body.refresh_token)
-    return {"detail": "logged out"}
+def logout(
+    payload: schemas.LogoutRequest,
+    db: Session = Depends(get_db), # <-- Uses central get_db
+):
+    auth.revoke_refresh_token(db, payload.refresh_token)
+    return None
+
+# ---------------------------
+# UPDATE EMAIL
+# ---------------------------
+@router.put(
+    "/me/email",
+    response_model=schemas.UserRead,
+    summary="Update your email",
+    description="Securely change your login email. This requires your current password.",
+    responses={
+        400: {"description": "Email already in use"},
+        401: {"description": "Invalid password"},
+    },
+)
+def update_my_email(
+    data: schemas.EmailUpdate,
+    db: Session = Depends(get_db), # <-- Uses central get_db
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    if not verify_password(data.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid password",
+        )
+
+    if data.new_email == current_user.email:
+        return current_user 
+
+    existing_user = db.scalar(
+        select(models.User).where(models.User.email == data.new_email)
+    )
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
+    current_user.email = data.new_email
+    db.commit()
+    db.refresh(current_user)
+    
+    return current_user

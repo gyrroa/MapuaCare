@@ -15,6 +15,12 @@ class UserRead(BaseModel):
     class Config:
         from_attributes = True
 
+# --- NEW: Schema for updating a user's email ---
+class EmailUpdate(BaseModel):
+    new_email: EmailStr = Field(..., description="The new, unique email")
+    current_password: str = Field(..., description="The user's current password for verification")
+
+
 # NEW: auth payloads
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., description="Refresh JWT")
@@ -27,17 +33,20 @@ class CandidateProfileCore(BaseModel):
     contact_number: Optional[str] = Field(None, example="+63 900 000 0000")
     college_program: Optional[str] = Field(None, example="BS Computer Science")
     batch_year: Optional[int] = Field(None, ge=1900, le=2100, example=2026)
-    resume_text: Optional[str] = Field(None, example="Experienced in Python and FastAPI...")
-    skills: Optional[List[str]] = Field(None, description="Skill names; auto-creates if missing", example=["Python", "FastAPI"])
-
+    
 class CandidateProfileCreate(CandidateProfileCore):
     full_name: str = Field(..., example="Alex Rivera")
 
 class CandidateProfileUpdate(CandidateProfileCore):
     full_name: Optional[str] = Field(None, example="Alex J. Rivera")
+    contact_number: Optional[str] = Field(None, example="+63 900 000 0000")
+    college_program: Optional[str] = Field(None, example="BS Computer Science")
+    batch_year: Optional[int] = Field(None, ge=1900, le=2100, example=2026)
+
 
 class CandidateProfileRead(BaseModel):
     candidate_id: int
+    email: EmailStr # <-- ADDED
     full_name: str
     contact_number: Optional[str] = None
     college_program: Optional[str] = None
@@ -50,9 +59,26 @@ class CandidateProfileRead(BaseModel):
     class Config:
         from_attributes = True
 
+class Skill(BaseModel):
+    id: str
+    name: str
+    class Config:
+        from_attributes = True
+
+class CVUploadResponse(BaseModel):
+    candidate_id: int
+    resume_file_url: str
+    resume_text: str
+    suggested_skills: List[Skill]
+
+class CandidateSkillUpdate(BaseModel):
+    skill_names: List[str] = Field(..., example=["Python", "Java", "New Custom Skill"])
+
+
 # ---------- Companies ----------
 class CompanyProfileRead(BaseModel):
     company_id: int
+    email: EmailStr # <-- ADDED
     company_name: str
     location: Optional[str] = None
     photo_url: Optional[str] = None
@@ -60,17 +86,15 @@ class CompanyProfileRead(BaseModel):
         from_attributes = True
 
 # ---------- Jobs ----------
-class CompanyJobCreate(BaseModel):
+class JobCreate(BaseModel):
     job_title: str = Field(..., example="Backend Engineer")
     job_description: str = Field(..., example="Build and maintain REST APIs with FastAPI.")
     job_category: Optional[str] = Field(None, example="Software Engineering")
-    skills: Optional[List[int]] = Field(None, description="Skill IDs from /skills", example=[1, 5, 42])
 
-class CompanyJobUpdate(BaseModel):
+class JobTextUpdate(BaseModel):
     job_title: Optional[str] = Field(None, example="Senior Backend Engineer")
     job_description: Optional[str] = Field(None, example="Own services and improve performance.")
     job_category: Optional[str] = Field(None, example="Software Engineering")
-    skills: Optional[List[int]] = Field(None, example=[1, 5, 42])
 
 class CompanyJobRead(BaseModel):
     job_id: int
@@ -80,6 +104,17 @@ class CompanyJobRead(BaseModel):
     job_category: Optional[str]
     class Config:
         from_attributes = True
+
+class JobCreateResponse(BaseModel):
+    job_id: int
+    job_title: str
+    job_description: Optional[str]
+    job_category: Optional[str]
+    suggested_skills: List[Skill]
+
+class JobSkillUpdate(BaseModel):
+    skill_names: List[str] = Field(..., example=["Python", "Java", "New Custom Skill"])
+
 
 # ---------- Skills ----------
 class SkillCreate(BaseModel):
@@ -154,21 +189,21 @@ class PageSkill(BaseModel):
 
 # NEW: Schema for job application details
 class JobApplicationRead(BaseModel):
-    application_id: int  # Application ID
-    candidate_id: int  # Candidate ID
-    job_id: int  # Job ID
-    applied_at: datetime  # When the application was made
+    application_id: int
+    candidate_id: int
+    job_id: int
+    applied_at: datetime
 
     class Config:
         from_attributes = True
 
 # NEW: Schema for job application data shown to the candidate
 class CandidateJobApplicationRead(BaseModel):
-    candidate_id: int  # Candidate ID
-    job_id: int  # Job ID
-    applied_at: datetime  # Date and time the application was made
+    candidate_id: int
+    job_id: int
+    applied_at: datetime
 
 # NEW: Pagination schema for job applications
 class PageJobApplication(BaseModel):
-    meta: PageMeta  # Pagination metadata
-    items: List[JobApplicationRead]  # List of job application records
+    meta: PageMeta
+    items: List[JobApplicationRead]

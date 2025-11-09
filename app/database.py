@@ -3,6 +3,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
 
+# --- ADD THIS FUNCTION ---
+def get_db():
+    """
+    Dependency to get a DB session.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        
 # More resilient engine config for Supabase
 engine = create_engine(
     settings.DATABASE_URL,
